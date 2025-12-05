@@ -9,7 +9,7 @@ spec:
     metadata:
       annotations:
         # VPC connector configuration
-        run.googleapis.com/vpc-access-connector: projects/nuitee-lite-api/locations/us-east1/connectors/lite-api-vpc
+        run.googleapis.com/vpc-access-connector: projects/nuitee-lite-api/locations/us-east1/connectors/vpc
         run.googleapis.com/vpc-access-egress: private-ranges-only
         # Cloud Run settings
         autoscaling.knative.dev/minScale: "1"
