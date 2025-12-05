@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -43,6 +44,7 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "room mappings not found for hotel"})
 			return
 		}
+		log.Printf("ERROR: Failed to fetch from Redis for key %s: %v", redisKey, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch room mappings"})
 		return
 	}
@@ -50,6 +52,7 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 	// Parse Redis data (assuming it's JSON)
 	var rawMappings map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &rawMappings); err != nil {
+		log.Printf("ERROR: Failed to parse room mappings JSON for hotel %s: %v. Data: %s", hotelID, err, data[:min(200, len(data))])
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse room mappings"})
 		return
 	}
@@ -95,5 +98,12 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 	c.Header("Content-Type", "application/json")
 	c.Header("Content-Encoding", "gzip")
 	c.Data(http.StatusOK, "application/json", buf.Bytes())
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
