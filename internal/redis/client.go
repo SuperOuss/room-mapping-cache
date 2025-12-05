@@ -8,34 +8,34 @@ import (
 )
 
 type Client struct {
-	client *redis.Client
+	clusterClient *redis.ClusterClient
 }
 
-func NewClient(addr, password string, db int) (*Client, error) {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:         addr,
+func NewClient(addrs []string, password string) (*Client, error) {
+	rdb := redis.NewClusterClient(&redis.ClusterOptions{
+		Addrs:        addrs,
 		Password:     password,
-		DB:           db,
 		PoolSize:     100,
 		MinIdleConns: 10,
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
 		PoolTimeout:  4 * time.Second,
+		MaxRetries:   3,
 	})
 
-	return &Client{client: rdb}, nil
+	return &Client{clusterClient: rdb}, nil
 }
 
 func (c *Client) Ping(ctx context.Context) error {
-	return c.client.Ping(ctx).Err()
+	return c.clusterClient.Ping(ctx).Err()
 }
 
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
-	return c.client.Get(ctx, key).Result()
+	return c.clusterClient.Get(ctx, key).Result()
 }
 
 func (c *Client) Close() error {
-	return c.client.Close()
+	return c.clusterClient.Close()
 }
 

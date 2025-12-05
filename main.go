@@ -19,8 +19,8 @@ import (
 func main() {
 	cfg := config.Load()
 
-	// Initialize Redis client
-	redisClient, err := redis.NewClient(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	// Initialize Redis cluster client
+	redisClient, err := redis.NewClient(cfg.RedisAddrs, cfg.RedisPassword)
 	if err != nil {
 		log.Fatalf("Failed to initialize Redis client: %v", err)
 	}
