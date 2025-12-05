@@ -9,7 +9,7 @@ spec:
     metadata:
       annotations:
         # VPC connector configuration
-        run.googleapis.com/vpc-access-connector: projects/PROJECT_ID/locations/REGION/connectors/CONNECTOR_NAME
+        run.googleapis.com/vpc-access-connector: projects/nuitee-lite-api/locations/us-east1/connectors/lite-api-vpc
         run.googleapis.com/vpc-access-egress: private-ranges-only
         # Cloud Run settings
         autoscaling.knative.dev/minScale: "1"
@@ -20,7 +20,7 @@ spec:
       containerConcurrency: 1000
       timeoutSeconds: 300
       containers:
-      - image: REGION-docker.pkg.dev/PROJECT_ID/REPOSITORY/room-mapping-cache:latest
+      - image: us-east1-docker.pkg.dev/nuitee-lite-api/docker-repo/room-mapping-cache:latest
         ports:
         - name: http1
           containerPort: 8080
@@ -34,10 +34,7 @@ spec:
         - name: REDIS_PORT
           value: "6379"
         - name: REDIS_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: redis-password
-              key: password
+          value: ""
         resources:
           limits:
             cpu: "2"
