@@ -13,6 +13,7 @@ type Config struct {
 	Environment   string
 	RedisAddrs    []string
 	RedisPassword string
+	UseCluster    bool
 }
 
 func Load() *Config {
@@ -51,11 +52,16 @@ func Load() *Config {
 		}
 	}
 
+	// Check if cluster mode is enabled (default: true for production, false for local)
+	useCluster := getEnv("REDIS_CLUSTER_MODE", "false")
+	useClusterBool := strings.ToLower(useCluster) == "true" || useCluster == "1"
+
 	return &Config{
 		Addr:          getEnv("ADDR", ":8080"),
 		Environment:   getEnv("ENVIRONMENT", "development"),
 		RedisAddrs:    addrs,
 		RedisPassword: getEnv("REDIS_PASSWORD", ""),
+		UseCluster:    useClusterBool,
 	}
 }
 

@@ -19,24 +19,28 @@ import (
 func main() {
 	cfg := config.Load()
 
-	log.Printf("Initializing Redis cluster client with addresses: %v", cfg.RedisAddrs)
+	redisMode := "single instance"
+	if cfg.UseCluster {
+		redisMode = "cluster"
+	}
+	log.Printf("Initializing Redis %s client with addresses: %v", redisMode, cfg.RedisAddrs)
 
-	// Initialize Redis cluster client
-	redisClient, err := redis.NewClient(cfg.RedisAddrs, cfg.RedisPassword)
+	// Initialize Redis client (cluster or single instance based on config)
+	redisClient, err := redis.NewClient(cfg.RedisAddrs, cfg.RedisPassword, cfg.UseCluster)
 	if err != nil {
 		log.Fatalf("Failed to initialize Redis client: %v", err)
 	}
 	defer redisClient.Close()
 
 	// Perform thorough Redis connection check on startup
-	log.Println("Checking Redis cluster connectivity...")
+	log.Printf("Checking Redis %s connectivity...", redisMode)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	
 	if err := redisClient.HealthCheck(ctx); err != nil {
-		log.Fatalf("CRITICAL: Failed to connect to Redis cluster: %v. Service will not start.", err)
+		log.Fatalf("CRITICAL: Failed to connect to Redis %s: %v. Service will not start.", redisMode, err)
 	}
-	log.Println("Redis cluster connection verified successfully")
+	log.Printf("Redis %s connection verified successfully", redisMode)
 
 	// Start background health check goroutine that will crash the service if Redis becomes unavailable
 	go monitorRedisHealth(redisClient)
@@ -103,9 +107,9 @@ func monitorRedisHealth(redisClient *redis.Client) {
 		cancel()
 
 		if err != nil {
-			log.Fatalf("CRITICAL: Redis cluster health check failed: %v. Service is crashing.", err)
+			log.Fatalf("CRITICAL: Redis health check failed: %v. Service is crashing.", err)
 		}
-		log.Println("Redis cluster health check passed")
+		log.Println("Redis health check passed")
 	}
 }
 
