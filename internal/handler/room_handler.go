@@ -1,0 +1,124 @@
+package handler
+
+import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"time"
+
+	"room-mapping-cache/internal/redis"
+
+	"github.com/gin-gonic/gin"
+	redisc "github.com/redis/go-redis/v9"
+)
+
+type RoomHandler struct {
+	redisClient *redis.Client
+}
+
+func NewRoomHandler(redisClient *redis.Client) *RoomHandler {
+	return &RoomHandler{
+		redisClient: redisClient,
+	}
+}
+
+type RoomMapping struct {
+	Confidence     float64 `json:"confidence"`
+	ID             int64   `json:"id"`
+	MatchRationale string  `json:"match_rationale"`
+	Name           string  `json:"name"`
+}
+
+func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
+	hotelID := c.Param("hotel_id")
+	if hotelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hotel_id is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	redisKey := fmt.Sprintf("room_map:%s", hotelID)
+	data, err := h.redisClient.Get(ctx, redisKey)
+	if err != nil {
+		if errors.Is(err, redisc.Nil) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "room mappings not found for hotel"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch room mappings"})
+		return
+	}
+
+	// Parse Redis data (assuming it's JSON)
+	var rawMappings map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &rawMappings); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse room mappings"})
+		return
+	}
+
+	// Transform to required format
+	result := make(map[string]RoomMapping)
+	for key, value := range rawMappings {
+		roomData, ok := value.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		var confidence float64
+		if c, ok := roomData["confidence"].(float64); ok {
+			confidence = c
+		}
+
+		var id int64
+		if i, ok := roomData["id"].(float64); ok {
+			id = int64(i)
+		}
+
+		matchRationale := ""
+		if mr, ok := roomData["match_rationale"].(string); ok {
+			matchRationale = mr
+		}
+
+		name := ""
+		if n, ok := roomData["name"].(string); ok {
+			name = n
+		}
+
+		result[key] = RoomMapping{
+			Confidence:     confidence,
+			ID:             id,
+			MatchRationale: matchRationale,
+			Name:           name,
+		}
+	}
+
+	// Marshal to JSON
+	jsonData, err := json.Marshal(result)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal response"})
+		return
+	}
+
+	// Compress response
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(jsonData); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compress response"})
+		return
+	}
+	if err := gz.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to close gzip writer"})
+		return
+	}
+
+	// Set headers and return compressed response
+	c.Header("Content-Type", "application/json")
+	c.Header("Content-Encoding", "gzip")
+	c.Data(http.StatusOK, "application/json", buf.Bytes())
+}
+

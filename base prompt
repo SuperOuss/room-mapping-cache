@@ -1,0 +1,15 @@
+Build a high availability go lang service that fetches room mappings from redis, marshalls it into a specific format, compresseses and then returns it to the user. This is what the format looks like 
+
+{
+    "1 queen bed": {
+        "confidence": 1,
+        "id": 827198,
+        "match_rationale": "Supplier specifies 'Queen bed'. This maps directly to the only Queen Room available (ID 827198), which is treated as a basic room type.",
+        "name": "Queen Room"
+    }
+}
+
+I need to return the 1 queen bed + id : 827198. 
+
+- The format in redis is room_map:{lp1897} the hotel id is lp1897 and is a string.
+- the endpoint would expect a very high number of hotels. and a high number of requests per second. 
