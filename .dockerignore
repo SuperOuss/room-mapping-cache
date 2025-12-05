@@ -1,0 +1,11 @@
+.git
+.gitignore
+*.md
+.env
+.env.local
+production envs
+cloudbuild.yaml
+service.yaml
+Dockerfile
+.dockerignore
+
