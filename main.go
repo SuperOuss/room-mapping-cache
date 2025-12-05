@@ -19,6 +19,8 @@ import (
 func main() {
 	cfg := config.Load()
 
+	log.Printf("Initializing Redis cluster client with addresses: %v", cfg.RedisAddrs)
+
 	// Initialize Redis cluster client
 	redisClient, err := redis.NewClient(cfg.RedisAddrs, cfg.RedisPassword)
 	if err != nil {
@@ -26,12 +28,18 @@ func main() {
 	}
 	defer redisClient.Close()
 
-	// Test Redis connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Perform thorough Redis connection check on startup
+	log.Println("Checking Redis cluster connectivity...")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := redisClient.Ping(ctx); err != nil {
-		log.Fatalf("Failed to connect to Redis: %v", err)
+	
+	if err := redisClient.HealthCheck(ctx); err != nil {
+		log.Fatalf("CRITICAL: Failed to connect to Redis cluster: %v. Service will not start.", err)
 	}
+	log.Println("Redis cluster connection verified successfully")
+
+	// Start background health check goroutine that will crash the service if Redis becomes unavailable
+	go monitorRedisHealth(redisClient)
 
 	// Set up router
 	if cfg.Environment == "production" {
@@ -43,6 +51,7 @@ func main() {
 
 	// Initialize handler
 	roomHandler := handler.NewRoomHandler(redisClient)
+	handler.SetRedisClient(redisClient)
 
 	// Routes
 	router.GET("/health", handler.HealthCheck)
@@ -81,5 +90,22 @@ func main() {
 	}
 
 	log.Println("Server exited")
+}
+
+// monitorRedisHealth periodically checks Redis connectivity and crashes the service if it fails
+func monitorRedisHealth(redisClient *redis.Client) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := redisClient.HealthCheck(ctx)
+		cancel()
+
+		if err != nil {
+			log.Fatalf("CRITICAL: Redis cluster health check failed: %v. Service is crashing.", err)
+		}
+		log.Println("Redis cluster health check passed")
+	}
 }
 
