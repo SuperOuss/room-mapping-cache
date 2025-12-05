@@ -26,13 +26,6 @@ func NewRoomHandler(redisClient *redis.Client) *RoomHandler {
 	}
 }
 
-type RoomMapping struct {
-	Confidence     float64 `json:"confidence"`
-	ID             int64   `json:"id"`
-	MatchRationale string  `json:"match_rationale"`
-	Name           string  `json:"name"`
-}
-
 func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 	hotelID := c.Param("hotel_id")
 	if hotelID == "" {
@@ -61,40 +54,22 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 		return
 	}
 
-	// Transform to required format
-	result := make(map[string]RoomMapping)
+	// Transform to simplified format: only room name (key) and id
+	result := make(map[string]int64)
 	for key, value := range rawMappings {
 		roomData, ok := value.(map[string]interface{})
 		if !ok {
 			continue
 		}
 
-		var confidence float64
-		if c, ok := roomData["confidence"].(float64); ok {
-			confidence = c
-		}
-
 		var id int64
 		if i, ok := roomData["id"].(float64); ok {
 			id = int64(i)
+		} else {
+			continue
 		}
 
-		matchRationale := ""
-		if mr, ok := roomData["match_rationale"].(string); ok {
-			matchRationale = mr
-		}
-
-		name := ""
-		if n, ok := roomData["name"].(string); ok {
-			name = n
-		}
-
-		result[key] = RoomMapping{
-			Confidence:     confidence,
-			ID:             id,
-			MatchRationale: matchRationale,
-			Name:           name,
-		}
+		result[key] = id
 	}
 
 	// Marshal to JSON
