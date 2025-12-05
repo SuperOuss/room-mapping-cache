@@ -37,7 +37,7 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	redisKey := fmt.Sprintf("room_map:%s", hotelID)
+	redisKey := fmt.Sprintf("room_map:{%s}", hotelID)
 	data, err := h.redisClient.Get(ctx, redisKey)
 	if err != nil {
 		if errors.Is(err, redisc.Nil) {
