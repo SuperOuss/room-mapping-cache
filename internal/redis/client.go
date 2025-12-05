@@ -65,4 +65,3 @@ func (c *Client) Get(ctx context.Context, key string) (string, error) {
 func (c *Client) Close() error {
 	return c.clusterClient.Close()
 }
-

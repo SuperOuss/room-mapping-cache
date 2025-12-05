@@ -1,8 +1,11 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strings"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -13,8 +16,17 @@ type Config struct {
 }
 
 func Load() *Config {
+	// Load .env file if it exists (for local development)
+	// Ignore errors if .env doesn't exist
+	if err := godotenv.Load(); err != nil {
+		// .env file is optional, only log if it's a different error
+		if !os.IsNotExist(err) {
+			log.Printf("Warning: Error loading .env file: %v", err)
+		}
+	}
+
 	var addrs []string
-	
+
 	// Support REDIS_HOST and REDIS_PORT (for production)
 	redisHost := getEnv("REDIS_HOST", "")
 	redisPort := getEnv("REDIS_PORT", "")
@@ -28,7 +40,7 @@ func Load() *Config {
 			}
 		}
 	}
-	
+
 	// Fallback to REDIS_ADDR if REDIS_HOST/REDIS_PORT not set
 	if len(addrs) == 0 {
 		redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
@@ -53,4 +65,3 @@ func getEnv(key, defaultValue string) string {
 	}
 	return defaultValue
 }
-
