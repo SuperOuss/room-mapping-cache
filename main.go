@@ -36,7 +36,7 @@ func main() {
 	log.Printf("Checking Redis %s connectivity...", redisMode)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	
+
 	if err := redisClient.HealthCheck(ctx); err != nil {
 		log.Fatalf("CRITICAL: Failed to connect to Redis %s: %v. Service will not start.", redisMode, err)
 	}
@@ -113,4 +113,3 @@ func monitorRedisHealth(redisClient *redis.Client) {
 		log.Println("Redis health check passed")
 	}
 }
-

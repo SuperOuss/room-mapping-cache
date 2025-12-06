@@ -24,6 +24,19 @@ type RoomHandler struct {
 	redisClient *redis.Client
 }
 
+type Room struct {
+	Name string `json:"name"`
+	ID   int64  `json:"id"`
+}
+
+type RoomMappingsResponse struct {
+	Rooms []Room `json:"rooms"`
+}
+
+type BatchRoomMappingsResponse struct {
+	Hotels map[string]RoomMappingsResponse `json:"hotels"`
+}
+
 func NewRoomHandler(redisClient *redis.Client) *RoomHandler {
 	return &RoomHandler{
 		redisClient: redisClient,
@@ -40,29 +53,11 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	redisKey := fmt.Sprintf("room_map:{%s}", hotelID)
-	hashData, err := h.redisClient.HGetAll(ctx, redisKey)
-	if err != nil {
-		if errors.Is(err, redisc.Nil) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "room mappings not found for hotel"})
-			return
-		}
-		log.Printf("ERROR: Failed to fetch from Redis hash for key %s: %v", redisKey, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch room mappings"})
-		return
-	}
-
-	// Check if hash is empty
-	if len(hashData) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "room mappings not found for hotel"})
-		return
-	}
-
 	// Use the shared function to fetch room mappings
 	result, err := h.fetchRoomMappingsForHotel(ctx, hotelID)
 	if err != nil {
 		if errors.Is(err, redisc.Nil) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "room mappings not found for hotel"})
+			c.JSON(http.StatusNotFound, RoomMappingsResponse{Rooms: []Room{}})
 			return
 		}
 		log.Printf("ERROR: Failed to fetch from Redis hash for key %s: %v", redisKey, err)
@@ -70,14 +65,19 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 		return
 	}
 
-	// Check if result is empty
-	if len(result) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "room mappings not found for hotel"})
-		return
+	// Convert map to array format
+	rooms := make([]Room, 0, len(result))
+	for name, id := range result {
+		rooms = append(rooms, Room{
+			Name: name,
+			ID:   id,
+		})
 	}
 
+	response := RoomMappingsResponse{Rooms: rooms}
+
 	// Marshal to JSON
-	jsonData, err := json.Marshal(result)
+	jsonData, err := json.Marshal(response)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal response"})
 		return
@@ -122,9 +122,9 @@ func (h *RoomHandler) GetRoomMappingsBatch(c *gin.Context) {
 
 	// Fetch room mappings for all hotels in parallel
 	type result struct {
-		hotelID string
+		hotelID  string
 		mappings map[string]int64
-		err     error
+		err      error
 	}
 
 	results := make(chan result, len(request.HotelIDs))
@@ -147,20 +147,31 @@ func (h *RoomHandler) GetRoomMappingsBatch(c *gin.Context) {
 	close(results)
 
 	// Collect results
-	response := make(map[string]map[string]int64)
+	response := BatchRoomMappingsResponse{
+		Hotels: make(map[string]RoomMappingsResponse),
+	}
 	for res := range results {
+		var rooms []Room
 		if res.err != nil {
 			if errors.Is(res.err, redisc.Nil) {
-				// Hotel not found - include empty map
-				response[res.hotelID] = make(map[string]int64)
+				// Hotel not found - include empty array
+				rooms = []Room{}
 			} else {
 				log.Printf("ERROR: Failed to fetch room mappings for hotel %s: %v", res.hotelID, res.err)
-				// Include empty map for errors too
-				response[res.hotelID] = make(map[string]int64)
+				// Include empty array for errors too
+				rooms = []Room{}
 			}
 		} else {
-			response[res.hotelID] = res.mappings
+			// Convert map to array format
+			rooms = make([]Room, 0, len(res.mappings))
+			for name, id := range res.mappings {
+				rooms = append(rooms, Room{
+					Name: name,
+					ID:   id,
+				})
+			}
 		}
+		response.Hotels[res.hotelID] = RoomMappingsResponse{Rooms: rooms}
 	}
 
 	// Marshal to JSON
@@ -244,11 +255,3 @@ func normalizeRoomName(name string) string {
 
 	return normalized
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
