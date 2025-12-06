@@ -60,6 +60,7 @@ func main() {
 	// Routes
 	router.GET("/health", handler.HealthCheck)
 	router.GET("/room-mappings/:hotel_id", roomHandler.GetRoomMappings)
+	router.POST("/room-mappings/batch", roomHandler.GetRoomMappingsBatch)
 
 	// Start server
 	srv := &http.Server{
