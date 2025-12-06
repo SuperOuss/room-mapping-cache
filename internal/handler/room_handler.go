@@ -38,33 +38,34 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 	defer cancel()
 
 	redisKey := fmt.Sprintf("room_map:{%s}", hotelID)
-	data, err := h.redisClient.Get(ctx, redisKey)
+	hashData, err := h.redisClient.HGetAll(ctx, redisKey)
 	if err != nil {
 		if errors.Is(err, redisc.Nil) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "room mappings not found for hotel"})
 			return
 		}
-		log.Printf("ERROR: Failed to fetch from Redis for key %s: %v", redisKey, err)
+		log.Printf("ERROR: Failed to fetch from Redis hash for key %s: %v", redisKey, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch room mappings"})
 		return
 	}
 
-	// Parse Redis data (assuming it's JSON)
-	var rawMappings map[string]interface{}
-	if err := json.Unmarshal([]byte(data), &rawMappings); err != nil {
-		log.Printf("ERROR: Failed to parse room mappings JSON for hotel %s: %v. Data: %s", hotelID, err, data[:min(200, len(data))])
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse room mappings"})
+	// Check if hash is empty
+	if len(hashData) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "room mappings not found for hotel"})
 		return
 	}
 
-	// Transform to simplified format: only room name (key) and id
+	// Transform hash data to simplified format: only room name (key) and id
 	result := make(map[string]int64)
-	for key, value := range rawMappings {
-		roomData, ok := value.(map[string]interface{})
-		if !ok {
+	for roomName, roomValue := range hashData {
+		// Parse the JSON value from the hash field
+		var roomData map[string]interface{}
+		if err := json.Unmarshal([]byte(roomValue), &roomData); err != nil {
+			log.Printf("ERROR: Failed to parse room data for %s: %v. Value: %s", roomName, err, roomValue[:min(200, len(roomValue))])
 			continue
 		}
 
+		// Extract the id field
 		var id int64
 		if i, ok := roomData["id"].(float64); ok {
 			id = int64(i)
@@ -72,7 +73,7 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 			continue
 		}
 
-		result[key] = id
+		result[roomName] = id
 	}
 
 	// Marshal to JSON

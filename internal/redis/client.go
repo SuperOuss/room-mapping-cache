@@ -102,6 +102,14 @@ func (c *Client) Get(ctx context.Context, key string) (string, error) {
 	return c.client.Get(ctx, key).Result()
 }
 
+// HGetAll retrieves all fields and values from a Redis hash
+func (c *Client) HGetAll(ctx context.Context, key string) (map[string]string, error) {
+	if c.isCluster {
+		return c.clusterClient.HGetAll(ctx, key).Result()
+	}
+	return c.client.HGetAll(ctx, key).Result()
+}
+
 func (c *Client) Close() error {
 	if c.isCluster {
 		return c.clusterClient.Close()
