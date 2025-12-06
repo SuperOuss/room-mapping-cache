@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -212,10 +214,35 @@ func (h *RoomHandler) fetchRoomMappingsForHotel(ctx context.Context, hotelID str
 			continue
 		}
 
-		result[roomName] = id
+		// Normalize room name before adding to result
+		normalizedRoomName := normalizeRoomName(roomName)
+		result[normalizedRoomName] = id
 	}
 
 	return result, nil
+}
+
+// normalizeRoomName normalizes room names for consistent comparison
+func normalizeRoomName(name string) string {
+	// Convert to lowercase and trim spaces
+	normalized := strings.ToLower(strings.TrimSpace(name))
+
+	// Replace multiple spaces with a single space
+	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
+
+	// Remove common punctuation that doesn't affect meaning
+	normalized = strings.ReplaceAll(normalized, "-", " ")
+	normalized = strings.ReplaceAll(normalized, ",", " ")
+	normalized = strings.ReplaceAll(normalized, ".", " ")
+	normalized = strings.ReplaceAll(normalized, "/", " ")
+	normalized = strings.ReplaceAll(normalized, "(", " ")
+	normalized = strings.ReplaceAll(normalized, ")", " ")
+
+	// Clean up any resulting multiple spaces again
+	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
+	normalized = strings.TrimSpace(normalized)
+
+	return normalized
 }
 
 func min(a, b int) int {
