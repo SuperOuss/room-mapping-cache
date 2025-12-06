@@ -60,7 +60,7 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 			c.JSON(http.StatusNotFound, RoomMappingsResponse{Rooms: []Room{}})
 			return
 		}
-		log.Printf("ERROR: Failed to fetch from Redis hash for key %s: %v", redisKey, err)
+		log.Printf("ERROR: Failed to fetch from Redis hash for hotel %s: %v", hotelID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch room mappings"})
 		return
 	}
