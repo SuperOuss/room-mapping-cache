@@ -1,15 +1,16 @@
 package handler
 
 import (
-	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,26 @@ import (
 	redisc "github.com/redis/go-redis/v9"
 )
 
+var (
+	wsRe          = regexp.MustCompile(`\s+`)
+	punctReplacer = strings.NewReplacer(
+		"-", " ",
+		",", " ",
+		".", " ",
+		"/", " ",
+		"(", " ",
+		")", " ",
+	)
+
+	gzipPool = sync.Pool{
+		New: func() any {
+			// BestSpeed is usually the right tradeoff for 1000 rps services.
+			w, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+			return w
+		},
+	}
+)
+
 type RoomHandler struct {
 	redisClient *redis.Client
 }
@@ -27,6 +48,10 @@ type RoomHandler struct {
 type Room struct {
 	Name string `json:"name"`
 	ID   int64  `json:"id"`
+}
+
+type roomValue struct {
+	ID json.Number `json:"id"`
 }
 
 type RoomMappingsResponse struct {
@@ -54,51 +79,14 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 	defer cancel()
 
 	// Use the shared function to fetch room mappings
-	result, err := h.fetchRoomMappingsForHotel(ctx, hotelID)
+	rooms, err := h.fetchRoomsForHotel(ctx, hotelID)
 	if err != nil {
-		if errors.Is(err, redisc.Nil) {
-			c.JSON(http.StatusNotFound, RoomMappingsResponse{Rooms: []Room{}})
-			return
-		}
 		log.Printf("ERROR: Failed to fetch from Redis hash for hotel %s: %v", hotelID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch room mappings"})
 		return
 	}
 
-	// Convert map to array format
-	rooms := make([]Room, 0, len(result))
-	for name, id := range result {
-		rooms = append(rooms, Room{
-			Name: name,
-			ID:   id,
-		})
-	}
-
-	response := RoomMappingsResponse{Rooms: rooms}
-
-	// Marshal to JSON
-	jsonData, err := json.Marshal(response)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal response"})
-		return
-	}
-
-	// Compress response
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(jsonData); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compress response"})
-		return
-	}
-	if err := gz.Close(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to close gzip writer"})
-		return
-	}
-
-	// Set headers and return compressed response
-	c.Header("Content-Type", "application/json")
-	c.Header("Content-Encoding", "gzip")
-	c.Data(http.StatusOK, "application/json", buf.Bytes())
+	writeJSONMaybeGzip(c, RoomMappingsResponse{Rooms: rooms})
 }
 
 // GetRoomMappingsBatch handles batch requests for multiple hotel IDs
@@ -106,152 +94,155 @@ func (h *RoomHandler) GetRoomMappingsBatch(c *gin.Context) {
 	var request struct {
 		HotelIDs []string `json:"hotel_ids" binding:"required"`
 	}
-
 	if err := c.ShouldBindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: hotel_ids array is required"})
 		return
 	}
 
-	if len(request.HotelIDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "hotel_ids array cannot be empty"})
+	// Hard caps are essential at 1000 rps
+	if len(request.HotelIDs) == 0 || len(request.HotelIDs) > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hotel_ids must contain 1..100 items"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	// Dedup to avoid duplicate Redis work (common in callers)
+	hotelIDs := dedupStringsInPlace(request.HotelIDs)
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1500*time.Millisecond)
 	defer cancel()
 
-	// Fetch room mappings for all hotels in parallel
-	type result struct {
-		hotelID  string
-		mappings map[string]int64
-		err      error
+	// -------- Redis pipelining (no goroutines) --------
+	pipe := h.redisClient.Pipeline()
+	cmds := make([]*redisc.MapStringStringCmd, 0, len(hotelIDs))
+	keys := make([]string, 0, len(hotelIDs))
+
+	for _, hotelID := range hotelIDs {
+		key := fmt.Sprintf("room_map:{%s}", hotelID)
+		keys = append(keys, hotelID)
+		cmds = append(cmds, pipe.HGetAll(ctx, key))
 	}
 
-	results := make(chan result, len(request.HotelIDs))
-	var wg sync.WaitGroup
-
-	for _, hotelID := range request.HotelIDs {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-			mappings, err := h.fetchRoomMappingsForHotel(ctx, id)
-			results <- result{
-				hotelID:  id,
-				mappings: mappings,
-				err:      err,
-			}
-		}(hotelID)
+	_, execErr := pipe.Exec(ctx)
+	// Exec can return a non-nil error even when some commands succeeded.
+	// We'll treat per-hotel errors individually below via cmd.Err().
+	if execErr != nil && !errors.Is(execErr, redisc.Nil) {
+		log.Printf("ERROR: redis pipeline exec failed: %v", execErr)
+		// still continue, cmds may contain partial results
 	}
 
-	wg.Wait()
-	close(results)
-
-	// Collect results
+	// -------- Build response --------
 	response := BatchRoomMappingsResponse{
-		Hotels: make(map[string]RoomMappingsResponse),
+		Hotels: make(map[string]RoomMappingsResponse, len(hotelIDs)),
 	}
-	for res := range results {
-		var rooms []Room
-		if res.err != nil {
-			if errors.Is(res.err, redisc.Nil) {
-				// Hotel not found - include empty array
-				rooms = []Room{}
-			} else {
-				log.Printf("ERROR: Failed to fetch room mappings for hotel %s: %v", res.hotelID, res.err)
-				// Include empty array for errors too
-				rooms = []Room{}
-			}
-		} else {
-			// Convert map to array format
-			rooms = make([]Room, 0, len(res.mappings))
-			for name, id := range res.mappings {
-				rooms = append(rooms, Room{
-					Name: name,
-					ID:   id,
-				})
-			}
+
+	for i, cmd := range cmds {
+		hotelID := keys[i]
+		hashData, err := cmd.Result()
+		if err != nil {
+			// Not found or other error -> empty
+			response.Hotels[hotelID] = RoomMappingsResponse{Rooms: []Room{}}
+			continue
 		}
-		response.Hotels[res.hotelID] = RoomMappingsResponse{Rooms: rooms}
+
+		rooms := parseRooms(hashData)
+		response.Hotels[hotelID] = RoomMappingsResponse{Rooms: rooms}
 	}
 
-	// Marshal to JSON
-	jsonData, err := json.Marshal(response)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal response"})
-		return
-	}
-
-	// Compress response
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(jsonData); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compress response"})
-		return
-	}
-	if err := gz.Close(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to close gzip writer"})
-		return
-	}
-
-	// Set headers and return compressed response
-	c.Header("Content-Type", "application/json")
-	c.Header("Content-Encoding", "gzip")
-	c.Data(http.StatusOK, "application/json", buf.Bytes())
+	writeJSONMaybeGzip(c, response)
 }
 
-// fetchRoomMappingsForHotel fetches room mappings for a single hotel
-func (h *RoomHandler) fetchRoomMappingsForHotel(ctx context.Context, hotelID string) (map[string]int64, error) {
+// fetchRoomsForHotel fetches room mappings for a single hotel
+func (h *RoomHandler) fetchRoomsForHotel(ctx context.Context, hotelID string) ([]Room, error) {
 	redisKey := fmt.Sprintf("room_map:{%s}", hotelID)
 	hashData, err := h.redisClient.HGetAll(ctx, redisKey)
 	if err != nil {
 		return nil, err
 	}
-
-	// Transform hash data to simplified format: only room name (key) and id
-	result := make(map[string]int64)
-	for roomName, roomValue := range hashData {
-		// Parse the JSON value from the hash field
-		var roomData map[string]interface{}
-		if err := json.Unmarshal([]byte(roomValue), &roomData); err != nil {
-			log.Printf("ERROR: Failed to parse room data for %s in hotel %s: %v", roomName, hotelID, err)
-			continue
-		}
-
-		// Extract the id field
-		var id int64
-		if i, ok := roomData["id"].(float64); ok {
-			id = int64(i)
-		} else {
-			continue
-		}
-
-		// Normalize room name before adding to result
-		normalizedRoomName := normalizeRoomName(roomName)
-		result[normalizedRoomName] = id
-	}
-
-	return result, nil
+	return parseRooms(hashData), nil
 }
 
 // normalizeRoomName normalizes room names for consistent comparison
 func normalizeRoomName(name string) string {
-	// Convert to lowercase and trim spaces
-	normalized := strings.ToLower(strings.TrimSpace(name))
+	s := strings.ToLower(strings.TrimSpace(name))
+	s = punctReplacer.Replace(s)
+	s = wsRe.ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
+}
 
-	// Replace multiple spaces with a single space
-	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
+func parseRooms(hashData map[string]string) []Room {
+	// Guardrail: cap processed rooms to avoid CPU/memory explosion on huge hashes
+	const maxRoomsToProcess = 2000
+	if len(hashData) > maxRoomsToProcess {
+		log.Printf("WARNING: hotel has %d rooms, truncating processing to %d", len(hashData), maxRoomsToProcess)
+	}
 
-	// Remove common punctuation that doesn't affect meaning
-	normalized = strings.ReplaceAll(normalized, "-", " ")
-	normalized = strings.ReplaceAll(normalized, ",", " ")
-	normalized = strings.ReplaceAll(normalized, ".", " ")
-	normalized = strings.ReplaceAll(normalized, "/", " ")
-	normalized = strings.ReplaceAll(normalized, "(", " ")
-	normalized = strings.ReplaceAll(normalized, ")", " ")
+	rooms := make([]Room, 0, len(hashData))
+	count := 0
 
-	// Clean up any resulting multiple spaces again
-	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
-	normalized = strings.TrimSpace(normalized)
+	for roomName, roomJSON := range hashData {
+		if count >= maxRoomsToProcess {
+			break
+		}
 
-	return normalized
+		var rv roomValue
+		// Optimization: could use byte scanning for "id" to avoid allocations,
+		// but Unmarshal is safe and pipeline provides biggest win.
+		if err := json.Unmarshal([]byte(roomJSON), &rv); err != nil {
+			log.Printf("ERROR: Failed to parse room data: %v", err)
+			continue
+		}
+
+		id, err := rv.ID.Int64()
+		if err != nil || id == 0 {
+			continue
+		}
+
+		rooms = append(rooms, Room{
+			Name: normalizeRoomName(roomName),
+			ID:   id,
+		})
+		count++
+	}
+
+	// Stable order for clients & caching
+	sort.Slice(rooms, func(i, j int) bool { return rooms[i].Name < rooms[j].Name })
+
+	return rooms
+}
+
+func writeJSONMaybeGzip(c *gin.Context, v any) {
+	c.Header("Content-Type", "application/json")
+
+	ae := c.GetHeader("Accept-Encoding")
+	if strings.Contains(ae, "gzip") {
+		c.Header("Content-Encoding", "gzip")
+		w := gzipPool.Get().(*gzip.Writer)
+		defer gzipPool.Put(w)
+
+		w.Reset(c.Writer)
+		defer w.Close()
+
+		enc := json.NewEncoder(w)
+		_ = enc.Encode(v)
+		return
+	}
+
+	enc := json.NewEncoder(c.Writer)
+	_ = enc.Encode(v)
+}
+
+func dedupStringsInPlace(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0]
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }

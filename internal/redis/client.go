@@ -110,6 +110,14 @@ func (c *Client) HGetAll(ctx context.Context, key string) (map[string]string, er
 	return c.client.HGetAll(ctx, key).Result()
 }
 
+// Pipeline returns a new Pipeliner
+func (c *Client) Pipeline() redis.Pipeliner {
+	if c.isCluster {
+		return c.clusterClient.Pipeline()
+	}
+	return c.client.Pipeline()
+}
+
 func (c *Client) Close() error {
 	if c.isCluster {
 		return c.clusterClient.Close()
