@@ -119,15 +119,10 @@ func (h *RoomHandler) GetRoomMappingsBatch(c *gin.Context) {
 	keys := make([]string, 0, len(hotelIDs))
 
 	for _, hotelID := range hotelIDs {
-		// Primary key: try with original hotel ID
-		primaryKey := fmt.Sprintf("room_map:{%s}", hotelID)
 		keys = append(keys, hotelID)
-		primaryCmds = append(primaryCmds, pipe.HGetAll(ctx, primaryKey))
-
-		// Fallback key: try alternate version (with # if original didn't have it, without # if it did)
-		fallbackID := getAlternateHotelID(hotelID)
-		fallbackKey := fmt.Sprintf("room_map:{%s}", fallbackID)
-		fallbackCmds = append(fallbackCmds, pipe.HGetAll(ctx, fallbackKey))
+		// Try with curly braces first, then without
+		primaryCmds = append(primaryCmds, pipe.HGetAll(ctx, fmt.Sprintf("room_map:{%s}", hotelID)))
+		fallbackCmds = append(fallbackCmds, pipe.HGetAll(ctx, fmt.Sprintf("room_map:%s", hotelID)))
 	}
 
 	_, execErr := pipe.Exec(ctx)
@@ -148,10 +143,10 @@ func (h *RoomHandler) GetRoomMappingsBatch(c *gin.Context) {
 		primaryCmd := primaryCmds[i]
 		fallbackCmd := fallbackCmds[i]
 
-		// Try primary key first
+		// Try with curly braces first
 		hashData, err := primaryCmd.Result()
 		if err != nil || len(hashData) == 0 {
-			// If primary failed or empty, try fallback
+			// If not found, try without curly braces
 			hashData, err = fallbackCmd.Result()
 			if err != nil || len(hashData) == 0 {
 				// Both failed -> empty
@@ -168,33 +163,22 @@ func (h *RoomHandler) GetRoomMappingsBatch(c *gin.Context) {
 }
 
 // fetchRoomsForHotel fetches room mappings for a single hotel
-// Tries both hashtagged and non-hashtagged versions
+// Tries with curly braces first, then without curly braces
 func (h *RoomHandler) fetchRoomsForHotel(ctx context.Context, hotelID string) ([]Room, error) {
-	// Try primary key first (as provided)
-	primaryKey := fmt.Sprintf("room_map:{%s}", hotelID)
-	hashData, err := h.redisClient.HGetAll(ctx, primaryKey)
+	// Try with curly braces first
+	keyWithBraces := fmt.Sprintf("room_map:{%s}", hotelID)
+	hashData, err := h.redisClient.HGetAll(ctx, keyWithBraces)
 	if err == nil && len(hashData) > 0 {
 		return parseRooms(hashData), nil
 	}
 
-	// If primary failed or empty, try alternate version
-	fallbackID := getAlternateHotelID(hotelID)
-	fallbackKey := fmt.Sprintf("room_map:{%s}", fallbackID)
-	hashData, err = h.redisClient.HGetAll(ctx, fallbackKey)
+	// If not found, try without curly braces
+	keyWithoutBraces := fmt.Sprintf("room_map:%s", hotelID)
+	hashData, err = h.redisClient.HGetAll(ctx, keyWithoutBraces)
 	if err != nil {
 		return nil, err
 	}
 	return parseRooms(hashData), nil
-}
-
-// getAlternateHotelID returns the alternate version of a hotel ID
-// If it has # prefix, returns without it; if it doesn't, returns with it
-func getAlternateHotelID(id string) string {
-	id = strings.TrimSpace(id)
-	if strings.HasPrefix(id, "#") {
-		return strings.TrimPrefix(id, "#")
-	}
-	return "#" + id
 }
 
 // normalizeRoomName normalizes room names for consistent comparison
