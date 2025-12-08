@@ -35,6 +35,8 @@ spec:
           value: "6379"
         - name: REDIS_PASSWORD
           value: ""
+        - name: REDIS_CLUSTER_MODE
+          value: "true"
         resources:
           limits:
             cpu: "2"

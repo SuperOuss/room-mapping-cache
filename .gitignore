@@ -35,3 +35,4 @@ dist/
 # Deployment backup files
 *.bak
 
+production envs

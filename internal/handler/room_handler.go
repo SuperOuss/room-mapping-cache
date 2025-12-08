@@ -78,7 +78,7 @@ func (h *RoomHandler) GetRoomMappings(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	// Use the shared function to fetch room mappings
+	// Use the shared function to fetch room mappings (tries both hashtagged and non-hashtagged)
 	rooms, err := h.fetchRoomsForHotel(ctx, hotelID)
 	if err != nil {
 		log.Printf("ERROR: Failed to fetch from Redis hash for hotel %s: %v", hotelID, err)
@@ -112,14 +112,22 @@ func (h *RoomHandler) GetRoomMappingsBatch(c *gin.Context) {
 	defer cancel()
 
 	// -------- Redis pipelining (no goroutines) --------
+	// Try primary keys first (as provided), then fallback keys
 	pipe := h.redisClient.Pipeline()
-	cmds := make([]*redisc.MapStringStringCmd, 0, len(hotelIDs))
+	primaryCmds := make([]*redisc.MapStringStringCmd, 0, len(hotelIDs))
+	fallbackCmds := make([]*redisc.MapStringStringCmd, 0, len(hotelIDs))
 	keys := make([]string, 0, len(hotelIDs))
 
 	for _, hotelID := range hotelIDs {
-		key := fmt.Sprintf("room_map:{%s}", hotelID)
+		// Primary key: try with original hotel ID
+		primaryKey := fmt.Sprintf("room_map:{%s}", hotelID)
 		keys = append(keys, hotelID)
-		cmds = append(cmds, pipe.HGetAll(ctx, key))
+		primaryCmds = append(primaryCmds, pipe.HGetAll(ctx, primaryKey))
+
+		// Fallback key: try alternate version (with # if original didn't have it, without # if it did)
+		fallbackID := getAlternateHotelID(hotelID)
+		fallbackKey := fmt.Sprintf("room_map:{%s}", fallbackID)
+		fallbackCmds = append(fallbackCmds, pipe.HGetAll(ctx, fallbackKey))
 	}
 
 	_, execErr := pipe.Exec(ctx)
@@ -135,13 +143,21 @@ func (h *RoomHandler) GetRoomMappingsBatch(c *gin.Context) {
 		Hotels: make(map[string]RoomMappingsResponse, len(hotelIDs)),
 	}
 
-	for i, cmd := range cmds {
+	for i := range hotelIDs {
 		hotelID := keys[i]
-		hashData, err := cmd.Result()
-		if err != nil {
-			// Not found or other error -> empty
-			response.Hotels[hotelID] = RoomMappingsResponse{Rooms: []Room{}}
-			continue
+		primaryCmd := primaryCmds[i]
+		fallbackCmd := fallbackCmds[i]
+
+		// Try primary key first
+		hashData, err := primaryCmd.Result()
+		if err != nil || len(hashData) == 0 {
+			// If primary failed or empty, try fallback
+			hashData, err = fallbackCmd.Result()
+			if err != nil || len(hashData) == 0 {
+				// Both failed -> empty
+				response.Hotels[hotelID] = RoomMappingsResponse{Rooms: []Room{}}
+				continue
+			}
 		}
 
 		rooms := parseRooms(hashData)
@@ -152,13 +168,33 @@ func (h *RoomHandler) GetRoomMappingsBatch(c *gin.Context) {
 }
 
 // fetchRoomsForHotel fetches room mappings for a single hotel
+// Tries both hashtagged and non-hashtagged versions
 func (h *RoomHandler) fetchRoomsForHotel(ctx context.Context, hotelID string) ([]Room, error) {
-	redisKey := fmt.Sprintf("room_map:{%s}", hotelID)
-	hashData, err := h.redisClient.HGetAll(ctx, redisKey)
+	// Try primary key first (as provided)
+	primaryKey := fmt.Sprintf("room_map:{%s}", hotelID)
+	hashData, err := h.redisClient.HGetAll(ctx, primaryKey)
+	if err == nil && len(hashData) > 0 {
+		return parseRooms(hashData), nil
+	}
+
+	// If primary failed or empty, try alternate version
+	fallbackID := getAlternateHotelID(hotelID)
+	fallbackKey := fmt.Sprintf("room_map:{%s}", fallbackID)
+	hashData, err = h.redisClient.HGetAll(ctx, fallbackKey)
 	if err != nil {
 		return nil, err
 	}
 	return parseRooms(hashData), nil
+}
+
+// getAlternateHotelID returns the alternate version of a hotel ID
+// If it has # prefix, returns without it; if it doesn't, returns with it
+func getAlternateHotelID(id string) string {
+	id = strings.TrimSpace(id)
+	if strings.HasPrefix(id, "#") {
+		return strings.TrimPrefix(id, "#")
+	}
+	return "#" + id
 }
 
 // normalizeRoomName normalizes room names for consistent comparison
